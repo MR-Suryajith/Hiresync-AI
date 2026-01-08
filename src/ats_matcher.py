@@ -32,7 +32,7 @@ class ATSMatcher:
         jd_emb = self.model.encode(jd_sents, convert_to_numpy=True)
         
         cos_scores = util.cos_sim(resume_emb, jd_emb)
-        max_scores = np.max(cos_scores, axis=1)
+        max_scores = np.max(cos_scores.cpu().detach().numpy(), axis=1)
         avg_score = float(np.mean(max_scores))
         
         return avg_score, max_scores.tolist()
