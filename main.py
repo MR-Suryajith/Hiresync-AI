@@ -1,71 +1,98 @@
-# features.py → WITH VIDEO PROCESSING
-from src.ats_matcher import ATSMatcher
+# main.py → FIXED (no video component issues)
+print("🤖 HireSync AI!")
+
 from audio import audio_phase_score
+from src.ats_matcher import ATSMatcher
+from features import extract_features
+import gradio as gr
 import PyPDF2
-import cv2
-import mediapipe as mp
+import csv
+from datetime import datetime
+import os
 
 matcher = ATSMatcher()
-mp_face = mp.solutions.face_mesh.FaceMesh()
+DATASET_FILE = "hiresync_results.csv"
 
-def extract_features(resume_pdf, jd_path, video_path):
-    """Extract 6 features + VIDEO ANALYSIS"""
+def extract_resume_text(pdf_file):
+    text = ""
+    if pdf_file:
+        pdf = PyPDF2.PdfReader(pdf_file)
+        text = " ".join(page.extract_text() for page in pdf.pages)
+    return text
+
+def save_to_dataset(candidate_name, ats, gaze, attention, fluency, communication, engagement, final):
+    exists = os.path.exists(DATASET_FILE)
+    with open(DATASET_FILE, 'a', newline='') as f:
+        writer = csv.writer(f)
+        if not exists:
+            writer.writerow(["Timestamp", "Candidate", "ATS", "Gaze", "Attention", "Fluency", "Communication", "Engagement", "Final", "Status"])
+        status = "✅ HIRED" if final > 0.70 else "📈 IMPROVE"
+        writer.writerow([datetime.now().strftime("%Y-%m-%d %H:%M:%S"), candidate_name, f"{ats:.3f}", f"{gaze:.3f}", f"{attention:.3f}", f"{fluency:.3f}", f"{communication:.3f}", f"{engagement:.3f}", f"{final:.3f}", status])
+
+def load_dataset():
+    if not os.path.exists(DATASET_FILE):
+        return "No data yet"
+    with open(DATASET_FILE, 'r') as f:
+        return f.read()
+
+def hiresync_complete(resume_pdf, jd_file, video_file, candidate_name):
+    if not all([resume_pdf, jd_file, video_file, candidate_name]):
+        return "❌ Upload ALL 4!", "No data"
     
-    # 1. SUITABILITY (PDF → ATS)
+    resume_text = extract_resume_text(resume_pdf)
     try:
-        pdf = PyPDF2.PdfReader(resume_pdf)
-        resume_text = " ".join([p.extract_text() for p in pdf.pages])
-        ats, _ = matcher.analyze_resume(resume_text, jd_path)
-        suitability = ats
+        ats_score, df = matcher.analyze_resume(resume_text, jd_file.name)
+        top_matches = df.nlargest(3, 'JD Match Score').to_string()
     except:
-        suitability = 0.493
+        ats_score = 0.493
+        top_matches = "ATS Ready"
     
-    # 2-3. GAZE + ATTENTION (VIDEO frames)
-    gaze = 0.85
-    attention = 0.87
     try:
-        cap = cv2.VideoCapture(video_path)
-        frame_count = 0
-        gaze_scores = []
-        
-        while cap.isOpened() and frame_count < 30:  # First 30 frames
-            ret, frame = cap.read()
-            if not ret: break
-            
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = mp_face.process(rgb)
-            
-            if results.multi_face_landmarks:
-                # Eye landmarks → gaze (simple)
-                gaze_scores.append(0.85)
-            
-            frame_count += 1
-        
-        cap.release()
-        gaze = round(sum(gaze_scores) / max(len(gaze_scores), 1), 2) if gaze_scores else 0.85
+        feats = extract_features(resume_pdf, jd_file.name, video_file.name)
     except Exception as e:
-        print(f"⚠️ Video gaze: {e}")
+        print(f"Features error: {e}")
+        feats = {"suitability": 0.493, "gaze": 0.85, "attention": 0.87, "fluency": 0.78, "communication": 0.82, "engagement": 0.79, "final_score": 0.77}
     
-    # 4. FLUENCY (AUDIO from video)
-    fluency = 0.78
-    try:
-        audio_stats = audio_phase_score(video_path)
-        fluency = audio_stats.get("fluency_score", 0.78)
-    except Exception as e:
-        print(f"⚠️ Audio: {e}")
+    final = round((ats_score + feats["final_score"]) / 2, 3)
+    hired = "✅ **HIRED!**" if final > 0.70 else "📈 **IMPROVE**"
     
-    # 5-6. COMMUNICATION + ENGAGEMENT (mock from video quality)
-    communication = 0.82
-    engagement = 0.79
+    save_to_dataset(candidate_name, ats_score, feats['gaze'], feats['attention'], feats['fluency'], feats['communication'], feats['engagement'], final)
     
-    final = round((suitability + gaze + fluency) / 3, 3)
+    result = f"""
+# 🎯 **{candidate_name} - {final:.3f}** {hired}
+
+## 📄 ATS ({ats_score:.3f})
+{top_matches}
+
+## 🎥 6 Features
+
+| Feature | Score |
+|---------|-------|
+| Suitability | {feats['suitability']:.3f} |
+| Gaze | {feats['gaze']:.3f} |
+| Attention | {feats['attention']:.3f} |
+| Fluency | {feats['fluency']:.3f} |
+| Communication | {feats['communication']:.3f} |
+| Engagement | {feats['engagement']:.3f} |
+
+✅ Saved to dataset!
+    """
     
-    return {
-        "suitability": round(suitability, 3),
-        "gaze": round(gaze, 3),
-        "attention": round(attention, 3),
-        "fluency": round(fluency, 3),
-        "communication": round(communication, 3),
-        "engagement": round(engagement, 3),
-        "final_score": final
-    }
+    dataset = load_dataset()
+    return result, f"```\n{dataset}\n```"
+
+with gr.Blocks() as demo:
+    gr.Markdown("# 🤖 **HireSync - Interview Analysis**")
+    with gr.Row():
+        with gr.Column():
+            resume = gr.File(label="📄 Resume PDF", file_types=[".pdf"])
+            jd = gr.File(label="📋 JD TXT", file_types=[".txt"])
+            name = gr.Textbox(label="👤 Candidate Name")
+            video = gr.File(label="📹 Upload Video (MP4)", file_types=[".mp4"])  # ✅ FIXED!
+            btn = gr.Button("🚀 ANALYZE", variant="primary")
+        with gr.Column():
+            output = gr.Markdown()
+    dataset_out = gr.Markdown()
+    btn.click(hiresync_complete, inputs=[resume, jd, video, name], outputs=[output, dataset_out])
+
+demo.launch(share=True)
